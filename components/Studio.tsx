@@ -11,10 +11,11 @@ import {
   INPAINT_NEGATIVE_EXTRA,
   SCENE_PRESETS,
   buildBackplatePrompt,
+  buildHarmonizePrompt,
   buildInpaintPrompt,
   joinNegative,
 } from "@/lib/presets";
-import { blobToDataURL, canvasToBlob, hasMeaningfulTransparency, imageToCanvas, loadImage, trimTransparent } from "@/lib/image";
+import { blobToDataURL, canvasToBlob, createCanvas, get2d, hasMeaningfulTransparency, imageToCanvas, loadImage, trimTransparent } from "@/lib/image";
 import {
   removeBackgroundInBrowser,
   removeSolidBackground,
@@ -58,6 +59,8 @@ interface GenResult {
   prompt: string;
   model: string;
   mode: GenerationMode;
+  /** Untuk hasil harmonisasi: id hasil backplate/inpaint sumbernya. */
+  sourceId?: string;
 }
 
 interface ApiError {
@@ -122,6 +125,13 @@ export default function Studio() {
   const [shadowStrength, setShadowStrength] = useState(0.75);
   const [paintReflection, setPaintReflection] = useState(0.25);
   const [floorReflection, setFloorReflection] = useState(0);
+  const [colorMatch, setColorMatch] = useState(0.5);
+  const [lightWrap, setLightWrap] = useState(0.35);
+  const [carSoftness, setCarSoftness] = useState(0.4);
+  const [grain, setGrain] = useState(0.25);
+  const [vignette, setVignette] = useState(0.2);
+  const [detailRestore, setDetailRestore] = useState(0.7);
+  const [busyTask, setBusyTask] = useState<"generate" | "harmonize">("generate");
   const [ambientTint, setAmbientTint] = useState(0.18);
   const [edgeSoftness, setEdgeSoftness] = useState(1.5);
   const [exportAspect, setExportAspect] = useState<Aspect>("4:5");
@@ -282,20 +292,29 @@ export default function Studio() {
 
   const selected = results.find((r) => r.id === selectedId) ?? null;
 
+  const composeOpts = useMemo(
+    () => ({
+      preserveCar,
+      ambientTint,
+      edgeSoftness,
+      shadowStrength,
+      paintReflection,
+      floorReflection,
+      colorMatch,
+      lightWrap,
+      carSoftness,
+      grain,
+      vignette,
+      detailRestore,
+    }),
+    [preserveCar, ambientTint, edgeSoftness, shadowStrength, paintReflection, floorReflection, colorMatch, lightWrap, carSoftness, grain, vignette, detailRestore],
+  );
   const sceneCanvas = useMemo(
     () =>
       selected && cutout
-        ? composeScene(selected.image, cutout, selected.rect, selected.aspect, {
-            mode: selected.mode,
-            preserveCar,
-            ambientTint,
-            edgeSoftness,
-            shadowStrength,
-            paintReflection,
-            floorReflection,
-          })
+        ? composeScene(selected.image, cutout, selected.rect, selected.aspect, { ...composeOpts, mode: selected.mode })
         : null,
-    [selected, cutout, preserveCar, ambientTint, edgeSoftness, shadowStrength, paintReflection, floorReflection],
+    [selected, cutout, composeOpts],
   );
   const framed = useMemo(
     () => (sceneCanvas && selected ? frameForInstagram(sceneCanvas, exportAspect, fitMode, rectCenter(selected.rect)) : null),
@@ -339,6 +358,7 @@ export default function Studio() {
     }
     const usedSeed = seedLocked ? seed : randomSeed();
     setSeed(usedSeed);
+    setBusyTask("generate");
     setGenerating(true);
     setGenError(null);
     const snapshot = inpaint;
@@ -378,6 +398,61 @@ export default function Studio() {
         prompt: finalPrompt,
         model: json.model ?? "unknown",
         mode: json.mode === "inpaint" ? "inpaint" : "backplate",
+      };
+      setResults((prev) => [result, ...prev].slice(0, MAX_RESULTS));
+      setSelectedId(result.id);
+    } catch (err) {
+      setGenError({ error: err instanceof Error ? err.message : "Gagal menghubungi server." });
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  // ---------- Harmonisasi AI (FLUX.2 + gambar referensi) ----------
+  const harmonizeSource = selected?.mode === "harmonized" ? results.find((r) => r.id === selected.sourceId) ?? null : selected;
+  const harmonize = async () => {
+    const src = harmonizeSource;
+    if (!src || !cutout || generating) return;
+    const usedSeed = seedLocked ? seed : randomSeed();
+    setSeed(usedSeed);
+    setBusyTask("harmonize");
+    setGenerating(true);
+    setGenError(null);
+    try {
+      // Komposit tanpa grain/vignette, diperkecil < 512×512 (batas referensi FLUX.2).
+      const composite = composeScene(src.image, cutout, src.rect, src.aspect, { ...composeOpts, mode: src.mode, grain: 0, vignette: 0 });
+      const refW = src.aspect === "4:5" ? 400 : 496;
+      const refH = src.aspect === "4:5" ? 500 : 496;
+      const ref = createCanvas(refW, refH);
+      get2d(ref).drawImage(composite, 0, 0, refW, refH);
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task: "harmonize",
+          reference_image: ref.toDataURL("image/jpeg", 0.92),
+          prompt: buildHarmonizePrompt(scene),
+          aspect: src.aspect,
+          quality: genQuality === 768 ? "high" : "standard",
+          seed: usedSeed,
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as (ApiError & { image?: string; model?: string }) | null;
+      if (!res.ok || !json?.image) {
+        setGenError(json ?? { error: `Server mengembalikan HTTP ${res.status}.` });
+        return;
+      }
+      const image = await loadImage(json.image);
+      const result: GenResult = {
+        id: `${Date.now()}-h${usedSeed}`,
+        image,
+        rect: src.rect,
+        aspect: src.aspect,
+        seed: usedSeed,
+        prompt: buildHarmonizePrompt(scene),
+        model: json.model ?? "unknown",
+        mode: "harmonized",
+        sourceId: src.id,
       };
       setResults((prev) => [result, ...prev].slice(0, MAX_RESULTS));
       setSelectedId(result.id);
@@ -706,7 +781,7 @@ export default function Studio() {
           {/* 4. Generate */}
           <Section step={4} title="Generate" subtitle="Cloudflare Workers AI · model aktif dipilih otomatis" disabled={!cutout}>
             <Button variant="primary" className="w-full py-3" onClick={generate} disabled={!inpaint || generating}>
-              {generating ? (
+              {generating && busyTask === "generate" ? (
                 <>
                   <Spinner /> Menggambar latar… {elapsed}s
                 </>
@@ -722,8 +797,33 @@ export default function Studio() {
             {selected && (
               <p className="mt-1 text-[11px] text-zinc-500">
                 <span className="text-zinc-400">Model terpakai:</span> {shortModel(selected.model)} ·{" "}
-                {selected.mode === "inpaint" ? "inpainting" : "backplate + komposit Canvas"} · seed {selected.seed}
+                {selected.mode === "inpaint"
+                  ? "inpainting"
+                  : selected.mode === "harmonized"
+                    ? "harmonisasi AI + detail asli"
+                    : "backplate + komposit Canvas"}{" "}
+                · seed {selected.seed}
               </p>
+            )}
+            {harmonizeSource && (
+              <div className="mt-4 rounded-xl border border-accent-500/30 bg-accent-500/5 p-3">
+                <p className="text-xs font-semibold text-zinc-100">✨ Harmonisasi AI: jadikan foto asli</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
+                  Komposit dikirim ke FLUX.2 sebagai referensi untuk dirender ulang menjadi satu foto: cahaya mobil disesuaikan,
+                  pantulan & bayangan natural. Detail halus mobil (emblem, velg) dikembalikan dari foto asli. Pakai 1× kuota generate lagi.
+                </p>
+                <Button className="mt-3 w-full border-accent-500/50" onClick={harmonize} disabled={generating}>
+                  {generating && busyTask === "harmonize" ? (
+                    <>
+                      <Spinner /> Merender ulang jadi foto… {elapsed}s
+                    </>
+                  ) : selected?.mode === "harmonized" ? (
+                    "Harmonisasi ulang (variasi lain)"
+                  ) : (
+                    "Harmonisasi AI"
+                  )}
+                </Button>
+              </div>
             )}
             {compositionChanged && !generating && (
               <div className="mt-3">
@@ -901,9 +1001,28 @@ export default function Studio() {
                     onChange={setPreserveCar}
                   />
                 )}
-                {(selected?.mode !== "inpaint" || preserveCar) && (
+                {selected?.mode === "harmonized" && (
+                  <Slider
+                    label="Kembalikan detail asli (emblem, velg, tulisan)"
+                    value={detailRestore}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    format={(v) => `${Math.round(v * 100)}%`}
+                    onChange={setDetailRestore}
+                  />
+                )}
+                {selected?.mode === "harmonized" && (
+                  <p className="text-[11px] leading-relaxed text-zinc-500">
+                    Bila muncul garis ganda/ghosting di bodi, posisi mobil hasil AI sedikit bergeser. Turunkan slider di atas.
+                  </p>
+                )}
+                {selected?.mode !== "harmonized" && (selected?.mode !== "inpaint" || preserveCar) && (
                   <>
                     <p className="text-xs font-medium text-zinc-200">Integrasi mobil ke latar</p>
+                    <Slider label="Cocokkan warna & cahaya" value={colorMatch} min={0} max={1} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setColorMatch} />
+                    <Slider label="Light wrap (cahaya di tepi mobil)" value={lightWrap} min={0} max={1} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setLightWrap} />
+                    <Slider label="Samakan ketajaman" value={carSoftness} min={0} max={2} step={0.1} format={(v) => `${v.toFixed(1)}px`} onChange={setCarSoftness} />
                     {selected?.mode !== "inpaint" && (
                       <>
                         <Slider label="Bayangan kontak ban" value={shadowStrength} min={0} max={1} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setShadowStrength} />
@@ -915,6 +1034,9 @@ export default function Studio() {
                     <Slider label="Kelembutan tepi mobil" value={edgeSoftness} min={0.5} max={5} step={0.25} format={(v) => `${v}px`} onChange={setEdgeSoftness} />
                   </>
                 )}
+                <p className="text-xs font-medium text-zinc-200">Finishing kamera</p>
+                <Slider label="Film grain" value={grain} min={0} max={1} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setGrain} />
+                <Slider label="Vignette" value={vignette} min={0} max={1} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setVignette} />
               </div>
 
               <div className="space-y-4">

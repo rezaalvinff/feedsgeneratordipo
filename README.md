@@ -16,7 +16,17 @@ Ubah foto studio mobil katalog (latar polos/hitam) menjadi foto komersial realis
 3. **Preset prompt otomotif.** Ada 5 preset (Jakarta Golden Hour, Highland Mountain Road, Luxury Showroom, Coastal Sunset Highway, Night City Street) plus Custom Prompt. Booster *"realistic environment reflections on glossy car paint, soft contact shadows under tires, 35mm lens, photorealistic…"* bisa di-toggle. Negative prompt, steps, guidance, strength, dan seed tersedia di Pengaturan lanjutan.
 4. **Generate** via `POST /api/generate` → Cloudflare Workers AI. Server mencoba model kandidat berurutan dan melewati model yang deprecated/tidak tersedia:
    `flux-2-klein-4b` → `flux-2-klein-9b` → `flux-1-schnell` → `leonardo/lucid-origin` → `leonardo/phoenix-1.0`. Model FLUX.2 dikirimi `multipart/form-data`, model lain JSON. Model yang terpakai ditampilkan di UI, dan model yang gagal/deprecated dicatat di log Vercel. (SDXL base, SDXL Lightning, SD 1.5 inpainting dan DreamShaper sudah di-deprecate per 2026-11-20 sehingga tidak ada di daftar default.)
-5. **Integrasi & export.** Mobil resolusi asli ditempel di atas latar AI. Yang bisa diatur: **bayangan kontak ban** (siluet di-squash + blur), **pantulan lantai** (showroom/aspal basah), **pantulan lingkungan di cat** (latar dicerminkan + blur, soft-light), *ambient color blend*, dan kelembutan tepi. Lalu Before vs After berdampingan, Auto-Crop (fokus ke mobil) atau Fit (latar blur) ke 4:5 / 1:1, watermark logo (upload/tempel, 4 pojok), dan download JPG/PNG high-res sekali klik.
+5. **Integrasi & export.** Mobil resolusi asli ditempel di atas latar AI. Yang bisa diatur:
+   - **cocokkan warna & cahaya** (white balance + exposure mengikuti latar)
+   - **light wrap** (cahaya latar membungkus tepi mobil)
+   - **samakan ketajaman**
+   - **bayangan kontak ban**
+   - **pantulan lantai** dan **pantulan lingkungan di cat**
+   - *ambient color blend*
+   - **film grain & vignette** seragam
+
+   Setelah itu: Before vs After berdampingan, Auto-Crop / Fit ke 4:5 / 1:1, watermark logo, dan download JPG/PNG.
+6. **✨ Harmonisasi AI (opsional, paling realistis).** Komposit dikirim ke FLUX.2 [klein] sebagai gambar referensi (`input_image_0`, < 512×512) untuk dirender ulang menjadi satu foto asli: mobil di-*relight* sesuai scene, dengan pantulan dan bayangan natural. Detail halus mobil (emblem, velg, tulisan) dikembalikan dari foto asli lewat *frequency separation*: frekuensi rendah (cahaya/warna) dari AI, frekuensi tinggi (tekstur) dari foto asli. Slider **Kembalikan detail asli** bisa diturunkan bila terlihat ghosting.
 
 ## Setup lokal
 
@@ -55,11 +65,13 @@ Body JSON:
 | `negative_prompt` | string | opsional |
 | `inpaint_prompt`, `inpaint_negative_prompt` | string | dipakai bila model inpainting |
 | `image`, `mask` | string | data URL / base64 PNG/JPG (maks 3MB). Wajib hanya untuk model inpainting. Mask: hitam = dikunci, putih = digambar ulang |
+| `task` | `"generate"` \| `"harmonize"` | default `generate` |
+| `reference_image` | string | wajib untuk `harmonize`: komposit JPG/PNG < 512×512, dikirim ke FLUX.2 sebagai `input_image_0` |
 | `aspect` | `"4:5"` \| `"1:1"` | ukuran generasi disesuaikan per model |
 | `quality` | `"standard"` \| `"high"` | |
 | `num_steps`, `guidance`, `strength`, `seed` | number | dipetakan ke parameter masing-masing model |
 
-Respons sukses: `{ image: "data:image/...;base64,...", model, mode: "backplate" | "inpaint", seed, attempts }`.
+Respons sukses: `{ image: "data:image/...;base64,...", model, mode: "backplate" | "inpaint" | "harmonized", seed, attempts }`.
 Respons error: `{ error, code, details?, attempts? }`, dengan `code` salah satu dari `MISSING_ENV` (500), `INVALID_REQUEST` (400), `UNAUTHORIZED` (401), `RATE_LIMITED` (429), `TIMEOUT` (504), `NETWORK_ERROR` / `UPSTREAM_ERROR` (502). `attempts` berisi daftar model yang dicoba beserta pesan error-nya.
 
 ## Catatan

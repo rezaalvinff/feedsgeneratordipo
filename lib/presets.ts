@@ -21,7 +21,7 @@ export const AUTOMOTIVE_BOOSTER =
  * lengkap dengan bayangan kontak & pantulan yang dibuat via Canvas).
  */
 export const BACKPLATE_BOOSTER =
-  "empty scene with no cars and no vehicles, open clear ground in the foreground, eye-level camera, 35mm lens, photorealistic, professional automotive photography backplate, natural realistic lighting, sharp focus, high detail";
+  "empty scene with no cars and no vehicles, wide open clear ground in the foreground, low camera at about one meter height, horizon line near the middle of the frame, 35mm lens, photorealistic, professional automotive photography backplate, natural realistic lighting, sharp focus, high detail";
 
 export const DEFAULT_NEGATIVE_PROMPT =
   "cartoon, illustration, painting, drawing, anime, cgi, 3d render, deformed, distorted, blurry, low quality, lowres, jpeg artifacts, watermark, text, logo, signature, oversaturated";
@@ -96,4 +96,21 @@ export function buildInpaintPrompt(scene: string, useBooster: boolean): string {
 export function joinNegative(base: string, extra: string): string {
   const b = clean(base);
   return b ? `${b}, ${extra}` : extra;
+}
+
+/**
+ * Prompt untuk pass harmonisasi FLUX.2 (gambar referensi = komposit mobil + latar).
+ * Tujuannya merender ulang menjadi SATU foto asli tanpa mengubah mobil.
+ */
+export function buildHarmonizePrompt(scene: string): string {
+  const s = clean(scene);
+  return [
+    "Turn this composite image into one authentic, unedited photograph taken on location.",
+    "Keep the exact same car: same make and model, body shape, paint color, wheels, badges, lights, size and position in the frame.",
+    "Keep the same background scene, camera angle and framing.",
+    s ? `Relight the car so it matches the scene lighting of ${s}.` : "Relight the car so it matches the scene lighting.",
+    "Add realistic reflections of the surroundings on the glossy paint and windows, natural contact shadows and ambient occlusion under the tires,",
+    "consistent color grading, matching sharpness and natural film grain across the whole image.",
+    "Shot on a full-frame DSLR with a 35mm lens, natural light, photorealistic, high detail, no CGI look.",
+  ].join(" ");
 }

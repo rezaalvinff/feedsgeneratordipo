@@ -38,7 +38,11 @@ type ErrorCode =
 
 type Aspect = "4:5" | "1:1";
 type Quality = "standard" | "high";
-type Mode = "backplate" | "inpaint";
+type Mode = "backplate" | "inpaint" | "harmonized";
+type Task = "generate" | "harmonize";
+
+const FLUX2_DEFAULTS = ["@cf/black-forest-labs/flux-2-klein-4b", "@cf/black-forest-labs/flux-2-klein-9b"];
+const MAX_REFERENCE_SIDE = 511; // FLUX.2: tiap gambar referensi harus < 512×512
 
 class RequestError extends Error {}
 
@@ -103,6 +107,28 @@ interface GenInput {
   seed?: number;
   image?: Uint8Array;
   mask?: Uint8Array;
+  task: Task;
+  /** Komposit (mobil + latar) untuk pass harmonisasi FLUX.2. */
+  reference?: Uint8Array;
+}
+
+/** Baca dimensi PNG/JPEG dari header (tanpa dependency). */
+function imageSize(buf: Uint8Array): { width: number; height: number } | null {
+  if (buf[0] === 0x89) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    return { width: dv.getUint32(16), height: dv.getUint32(20) };
+  }
+  let i = 2;
+  while (i + 9 < buf.length) {
+    if (buf[i] !== 0xff) return null;
+    const marker = buf[i + 1];
+    const len = (buf[i + 2] << 8) | buf[i + 3];
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      return { height: (buf[i + 5] << 8) | buf[i + 6], width: (buf[i + 7] << 8) | buf[i + 8] };
+    }
+    i += 2 + len;
+  }
+  return null;
 }
 
 const isInpaintModel = (model: string) => model.includes("inpaint");
@@ -139,6 +165,16 @@ function buildBody(model: string, input: GenInput): { body: Record<string, unkno
         strength: input.strength,
         ...seed,
       },
+    };
+  }
+
+  if (input.task === "harmonize") {
+    if (!model.includes("/flux-2-")) throw new RequestError("Harmonisasi hanya didukung model FLUX.2.");
+    const { width, height } = sizeFor("flux2", input.aspect, input.quality);
+    return {
+      mode: "harmonized",
+      multipart: true,
+      body: { prompt: input.prompt, width, height, ...seed, input_image_0: input.reference },
     };
   }
 
@@ -190,7 +226,15 @@ function buildBody(model: string, input: GenInput): { body: Record<string, unkno
 /** Body multipart; fetch otomatis mengisi Content-Type + boundary. */
 function toFormData(body: Record<string, unknown>): FormData {
   const form = new FormData();
-  for (const [k, v] of Object.entries(body)) if (v !== undefined && v !== null) form.append(k, String(v));
+  for (const [k, v] of Object.entries(body)) {
+    if (v === undefined || v === null) continue;
+    if (v instanceof Uint8Array) {
+      const jpg = v[0] === 0xff;
+      form.append(k, new Blob([new Uint8Array(v)], { type: jpg ? "image/jpeg" : "image/png" }), `${k}.${jpg ? "jpg" : "png"}`);
+    } else {
+      form.append(k, String(v));
+    }
+  }
   return form;
 }
 
@@ -249,10 +293,18 @@ export async function POST(req: NextRequest) {
       guidance: num(payload.guidance, 7.5, 0, 30, "guidance"),
       strength: num(payload.strength, 1, 0, 1, "strength"),
       seed: payload.seed === undefined || payload.seed === null ? undefined : Math.floor(num(payload.seed, 0, 0, 4_294_967_295, "seed")),
+      task: payload.task === "harmonize" ? "harmonize" : "generate",
     };
     // image & mask hanya wajib untuk model inpainting, tapi divalidasi bila dikirim.
     if (payload.image !== undefined) input.image = decodeImage(payload.image, "image");
     if (payload.mask !== undefined) input.mask = decodeImage(payload.mask, "mask");
+    if (input.task === "harmonize") {
+      input.reference = decodeImage(payload.reference_image, "reference_image");
+      const size = imageSize(input.reference);
+      if (!size || size.width > MAX_REFERENCE_SIDE || size.height > MAX_REFERENCE_SIDE) {
+        throw new RequestError(`reference_image harus lebih kecil dari 512×512 (diterima ${size ? `${size.width}×${size.height}` : "ukuran tidak terbaca"}).`);
+      }
+    }
   } catch (err) {
     if (err instanceof RequestError) return fail(400, "INVALID_REQUEST", err.message);
     throw err;
@@ -261,7 +313,10 @@ export async function POST(req: NextRequest) {
   const deadline = Date.now() + TOTAL_BUDGET_MS;
   const attempts: Attempt[] = [];
 
-  for (const model of models) {
+  const flux2 = models.filter((m) => m.includes("/flux-2-"));
+  const candidates = input.task === "harmonize" ? (flux2.length ? flux2 : FLUX2_DEFAULTS) : models;
+
+  for (const model of candidates) {
     const remaining = deadline - Date.now();
     if (remaining < MIN_ATTEMPT_MS) break;
 
