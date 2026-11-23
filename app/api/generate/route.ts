@@ -5,18 +5,18 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * Urutan model kandidat. Cloudflare sesekali men-deprecate model (mis.
- * `@cf/runwayml/stable-diffusion-v1-5-inpainting` pada 2026-11-20), jadi route ini
- * mencoba model berikutnya bila model ditolak (410 deprecated / 404 / 400 / 5xx).
+ * Urutan model kandidat. Per 2026-11-20 Cloudflare men-deprecate (HTTP 410, error 5028)
+ * stable-diffusion-xl-base-1.0, stable-diffusion-v1-5-inpainting, stable-diffusion-xl-lightning
+ * dan dreamshaper-8-lcm; pengganti resminya flux-2-klein-9b. Route ini mencoba model
+ * berikutnya bila model ditolak (410 / 404 / 400 / 5xx).
  * Override lewat env `CLOUDFLARE_AI_MODEL` (satu atau beberapa id dipisah koma).
  */
 const DEFAULT_MODELS = [
+  "@cf/black-forest-labs/flux-2-klein-9b",
+  "@cf/black-forest-labs/flux-2-klein-4b",
   "@cf/black-forest-labs/flux-1-schnell",
-  "@cf/leonardo/phoenix-1.0",
   "@cf/leonardo/lucid-origin",
-  "@cf/bytedance/stable-diffusion-xl-lightning",
-  "@cf/stabilityai/stable-diffusion-xl-base-1.0",
-  "@cf/lykon/dreamshaper-8-lcm",
+  "@cf/leonardo/phoenix-1.0",
 ];
 
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // jaga di bawah limit body 4.5MB Vercel
@@ -104,13 +104,13 @@ interface GenInput {
 const isInpaintModel = (model: string) => model.includes("inpaint");
 
 /** Ukuran output per keluarga model (kelipatan 8, rasio 4:5 atau 1:1). */
-function sizeFor(family: "sd15" | "sdxl" | "leonardo", aspect: Aspect, quality: Quality) {
+function sizeFor(family: "sd15" | "sdxl" | "leonardo" | "flux2", aspect: Aspect, quality: Quality) {
   const base = family === "sd15" ? (quality === "high" ? 768 : 512) : quality === "high" ? 1024 : 768;
   return aspect === "4:5" ? { width: base, height: Math.round((base * 1.25) / 8) * 8 } : { width: base, height: base };
 }
 
 /** Bangun body request sesuai skema tiap keluarga model. */
-function buildBody(model: string, input: GenInput): { body: Record<string, unknown>; mode: Mode } {
+function buildBody(model: string, input: GenInput): { body: Record<string, unknown>; mode: Mode; multipart?: boolean } {
   const seed = input.seed !== undefined ? { seed: input.seed } : {};
 
   if (isInpaintModel(model)) {
@@ -131,6 +131,13 @@ function buildBody(model: string, input: GenInput): { body: Record<string, unkno
         ...seed,
       },
     };
+  }
+
+  if (model.includes("/flux-2-")) {
+    // FLUX.2 (dev / klein) di Workers AI menerima multipart/form-data.
+    // Kirim field minimal: prompt, width, height, seed.
+    const { width, height } = sizeFor("flux2", input.aspect, input.quality);
+    return { mode: "backplate", multipart: true, body: { prompt: input.prompt, width, height, ...seed } };
   }
 
   if (model.includes("flux-1-schnell")) {
@@ -168,6 +175,13 @@ function buildBody(model: string, input: GenInput): { body: Record<string, unkno
       ...seed,
     },
   };
+}
+
+/** Body multipart; fetch otomatis mengisi Content-Type + boundary. */
+function toFormData(body: Record<string, unknown>): FormData {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(body)) if (v !== undefined && v !== null) form.append(k, String(v));
+  return form;
 }
 
 type CfJson = { success?: boolean; result?: { image?: string }; image?: string; errors?: { code?: number; message?: string }[] };
@@ -256,8 +270,12 @@ export async function POST(req: NextRequest) {
     try {
       upstream = await fetch(url, {
         method: "POST",
-        headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify(built.body),
+        ...(built.multipart
+          ? { headers: { Authorization: `Bearer ${apiToken}` }, body: toFormData(built.body) }
+          : {
+              headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
+              body: JSON.stringify(built.body),
+            }),
         signal: AbortSignal.timeout(remaining),
         cache: "no-store",
       });
@@ -289,6 +307,11 @@ export async function POST(req: NextRequest) {
     }
 
     attempts.push({ model, status: upstream.status, message });
+    if (upstream.status === 410 || message.includes("5028") || message.toLowerCase().includes("deprecated")) {
+      console.warn(`[generate] Model ${model} sudah deprecated (HTTP ${upstream.status}); lanjut ke model berikutnya.`);
+    } else {
+      console.warn(`[generate] Model ${model} gagal (HTTP ${upstream.status}): ${message}`);
+    }
     const lower = message.toLowerCase();
 
     // Error yang tidak akan beres dengan mengganti model -> berhenti.
