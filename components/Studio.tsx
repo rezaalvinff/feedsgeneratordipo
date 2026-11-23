@@ -12,6 +12,7 @@ import {
   SCENE_PRESETS,
   buildBackplatePrompt,
   buildHarmonizePrompt,
+  buildFullPhotoPrompt,
   buildRealPhotoPrompt,
   buildInpaintPrompt,
   joinNegative,
@@ -65,7 +66,24 @@ interface GenResult {
   realism?: Realism;
 }
 
-type Realism = "strong" | "subtle";
+type Realism = "full" | "strong" | "subtle";
+type HarmonizeModel = "@cf/black-forest-labs/flux-2-klein-4b" | "@cf/black-forest-labs/flux-2-klein-9b" | "@cf/black-forest-labs/flux-2-dev";
+
+/** Gambar ke kanvas JPEG data URL yang muat < 512×512 (batas referensi FLUX.2). */
+function toReference(src: CanvasImageSource & { width: number; height: number }, background?: string): string {
+  const w = (src as HTMLImageElement).naturalWidth || src.width;
+  const h = (src as HTMLImageElement).naturalHeight || src.height;
+  const pad = background ? 16 : 0;
+  const k = Math.min((496 - pad) / w, (496 - pad) / h);
+  const c = createCanvas(Math.round(w * k) + pad, Math.round(h * k) + pad);
+  const x = get2d(c);
+  if (background) {
+    x.fillStyle = background;
+    x.fillRect(0, 0, c.width, c.height);
+  }
+  x.drawImage(src, pad / 2, pad / 2, w * k, h * k);
+  return c.toDataURL("image/jpeg", 0.92);
+}
 
 interface ApiError {
   error?: string;
@@ -135,7 +153,8 @@ export default function Studio() {
   const [grain, setGrain] = useState(0.25);
   const [vignette, setVignette] = useState(0.2);
   const [detailRestore, setDetailRestore] = useState(0.7);
-  const [realism, setRealism] = useState<Realism>("strong");
+  const [realism, setRealism] = useState<Realism>("full");
+  const [harmonizeModel, setHarmonizeModel] = useState<HarmonizeModel>("@cf/black-forest-labs/flux-2-dev");
   const [busyTask, setBusyTask] = useState<"generate" | "harmonize">("generate");
   const [ambientTint, setAmbientTint] = useState(0.18);
   const [edgeSoftness, setEdgeSoftness] = useState(1.5);
@@ -426,34 +445,30 @@ export default function Studio() {
     try {
       // Komposit tanpa grain/vignette, diperkecil < 512×512 (batas referensi FLUX.2).
       const composite = composeScene(src.image, cutout, src.rect, src.aspect, { ...composeOpts, mode: src.mode, grain: 0, vignette: 0 });
-      const refW = src.aspect === "4:5" ? 400 : 496;
-      const refH = src.aspect === "4:5" ? 500 : 496;
-      const ref = createCanvas(refW, refH);
-      get2d(ref).drawImage(composite, 0, 0, refW, refH);
-      // Mode kuat: foto mobil asli sebagai referensi ke-2 (identitas model), muat dalam 496px.
+      const carRef = toReference(cutout, "#ffffff");
+      let mainRef: string;
       const extraRefs: string[] = [];
-      if (realism === "strong") {
-        const k = Math.min(496 / cutout.width, 496 / cutout.height);
-        const carRef = createCanvas(cutout.width * k + 16, cutout.height * k + 16);
-        const cr = get2d(carRef);
-        cr.fillStyle = "#808080";
-        cr.fillRect(0, 0, carRef.width, carRef.height);
-        cr.drawImage(cutout, 8, 8, cutout.width * k, cutout.height * k);
-        if (carRef.width > 511 || carRef.height > 511) {
-          const s2 = createCanvas(Math.min(511, carRef.width), Math.min(511, carRef.height));
-          get2d(s2).drawImage(carRef, 0, 0, s2.width, s2.height);
-          extraRefs.push(s2.toDataURL("image/jpeg", 0.92));
-        } else {
-          extraRefs.push(carRef.toDataURL("image/jpeg", 0.92));
-        }
+      if (realism === "full") {
+        // Foto baru dari nol: image 1 = mobil, image 2 = lokasi (latar AI tanpa mobil).
+        mainRef = carRef;
+        if (src.mode === "backplate") extraRefs.push(toReference(src.image));
+      } else {
+        mainRef = toReference(composite);
+        if (realism === "strong") extraRefs.push(carRef);
       }
-      const harmPrompt = realism === "strong" ? buildRealPhotoPrompt(scene) : buildHarmonizePrompt(scene);
+      const harmPrompt =
+        realism === "full"
+          ? buildFullPhotoPrompt(scene, extraRefs.length > 0)
+          : realism === "strong"
+            ? buildRealPhotoPrompt(scene)
+            : buildHarmonizePrompt(scene);
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           task: "harmonize",
-          reference_image: ref.toDataURL("image/jpeg", 0.92),
+          reference_image: mainRef,
+          preferred_model: harmonizeModel,
           extra_reference_images: extraRefs,
           prompt: harmPrompt,
           aspect: src.aspect,
@@ -480,7 +495,7 @@ export default function Studio() {
         realism,
       };
       // Kuat: biarkan mobil hasil AI apa adanya (tekstur CGI asli tidak ditempel ulang).
-      setDetailRestore(realism === "strong" ? 0 : 0.7);
+      setDetailRestore(realism === "subtle" ? 0.7 : 0);
       setResults((prev) => [result, ...prev].slice(0, MAX_RESULTS));
       setSelectedId(result.id);
     } catch (err) {
@@ -827,7 +842,7 @@ export default function Studio() {
                 {selected.mode === "inpaint"
                   ? "inpainting"
                   : selected.mode === "harmonized"
-                    ? `harmonisasi AI (${selected.realism === "strong" ? "kuat, mobil dirender ulang" : "halus + detail asli"})`
+                    ? `harmonisasi AI (${selected.realism === "full" ? "AI penuh, foto baru" : selected.realism === "strong" ? "kuat, mobil dirender ulang" : "halus + detail asli"})`
                     : "backplate + komposit Canvas"}{" "}
                 · seed {selected.seed}
               </p>
@@ -844,14 +859,32 @@ export default function Studio() {
                     value={realism}
                     onChange={setRealism}
                     options={[
-                      { value: "strong", label: "Kuat · mobil dirender ulang" },
-                      { value: "subtle", label: "Halus · jaga detail asli" },
+                      { value: "full", label: "AI penuh · foto baru" },
+                      { value: "strong", label: "Kuat · edit komposit" },
+                      { value: "subtle", label: "Halus" },
                     ]}
                   />
                   <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-500">
-                    {realism === "strong"
-                      ? "Paling seperti foto asli. Cocok untuk foto katalog render 3D/CGI. Detail kecil (tulisan emblem, plat) bisa sedikit berubah."
-                      : "Hanya menyesuaikan cahaya & warna. Mobil hampir identik dengan foto asli, termasuk tampilan CGI-nya."}
+                    {realism === "full"
+                      ? "Paling realistis. AI memotret ulang mobil yang sama di lokasi itu dari nol, jadi mobil & latar menyatu. Posisi mobil dan detail kecil (tulisan emblem/plat) bisa berbeda."
+                      : realism === "strong"
+                        ? "AI mengedit komposit. Posisi terjaga, tapi model kecil cenderung menyalin tampilan CGI."
+                        : "Hanya menyesuaikan cahaya & warna. Mobil hampir identik dengan foto asli, termasuk tampilan CGI-nya."}
+                  </p>
+                  <p className="mb-1.5 mt-3 text-[11px] text-zinc-400">Model</p>
+                  <Segmented<HarmonizeModel>
+                    size="sm"
+                    value={harmonizeModel}
+                    onChange={setHarmonizeModel}
+                    options={[
+                      { value: "@cf/black-forest-labs/flux-2-dev", label: "FLUX.2 dev · terbaik" },
+                      { value: "@cf/black-forest-labs/flux-2-klein-9b", label: "Klein 9B" },
+                      { value: "@cf/black-forest-labs/flux-2-klein-4b", label: "Klein 4B · cepat" },
+                    ]}
+                  />
+                  <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-500">
+                    Bila model pilihan gagal, otomatis dicoba model FLUX.2 lain. Lisensi: Klein 4B Apache 2.0. FLUX.2 dev &amp; Klein 9B memakai
+                    lisensi non-komersial BFL, jadi cek ketentuan penggunaan komersialnya.
                   </p>
                 </div>
                 <Button className="mt-3 w-full border-accent-500/50" onClick={harmonize} disabled={generating}>

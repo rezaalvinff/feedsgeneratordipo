@@ -131,3 +131,24 @@ export function buildRealPhotoPrompt(scene: string): string {
     "Editorial automotive photography shot on a full-frame DSLR with a 35mm lens, natural light, ultra realistic, not a 3D render, not CGI.",
   ].join(" ");
 }
+
+/**
+ * Mode "AI penuh": foto baru dari nol. Image 1 = mobil (identitas), image 2 = lokasi (latar AI).
+ * Tidak ada piksel komposit yang disalin, jadi mobil & latar dirender bersama dengan cahaya yang sama.
+ */
+export function buildFullPhotoPrompt(scene: string, hasLocationRef: boolean): string {
+  const s = clean(scene);
+  const where = hasLocationRef
+    ? `parked in the location shown in image 2${s ? ` (${s})` : ""}`
+    : `parked in ${s || "a realistic outdoor location"}`;
+  return [
+    `A real, candid photograph of the car shown in image 1, ${where}.`,
+    "It must be the same make and model with the same body shape, paint color, grille, headlights, badges and wheel design as in image 1,",
+    "seen from the same camera angle on the car as in image 1, large in the frame, with all tires resting on the ground.",
+    "Image 1 is a CGI studio render: do NOT copy its rendered look.",
+    "Photograph it as a real physical vehicle: real metallic paint reflecting the sky and surroundings, real glass reflections, real rubber tires with soft contact shadows,",
+    "natural light coming from the scene, realistic dynamic range, tiny real-world imperfections, slight dust on the tires.",
+    "Shot on a full-frame mirrorless camera with a 35mm lens at f/4, natural light, subtle film grain, editorial automotive photography,",
+    "ultra realistic photo, not a 3D render, not CGI, not an illustration.",
+  ].join(" ");
+}

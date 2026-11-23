@@ -41,7 +41,12 @@ type Quality = "standard" | "high";
 type Mode = "backplate" | "inpaint" | "harmonized";
 type Task = "generate" | "harmonize";
 
-const FLUX2_DEFAULTS = ["@cf/black-forest-labs/flux-2-klein-4b", "@cf/black-forest-labs/flux-2-klein-9b"];
+const FLUX2_DEFAULTS = [
+  "@cf/black-forest-labs/flux-2-klein-4b",
+  "@cf/black-forest-labs/flux-2-klein-9b",
+  "@cf/black-forest-labs/flux-2-dev",
+];
+const FLUX2_ID = /^@cf\/black-forest-labs\/flux-2-[a-z0-9.-]+$/;
 const MAX_REFERENCE_SIDE = 511; // FLUX.2: tiap gambar referensi harus < 512×512
 
 class RequestError extends Error {}
@@ -329,12 +334,18 @@ export async function POST(req: NextRequest) {
   const deadline = Date.now() + TOTAL_BUDGET_MS;
   const attempts: Attempt[] = [];
 
-  const flux2 = models.filter((m) => m.includes("/flux-2-"));
-  const candidates = input.task === "harmonize" ? (flux2.length ? flux2 : FLUX2_DEFAULTS) : models;
+  const flux2 = Array.from(new Set([...models.filter((m) => m.includes("/flux-2-")), ...FLUX2_DEFAULTS]));
+  // Harmonisasi: model pilihan user (hanya FLUX.2) dicoba duluan, sisanya sebagai fallback.
+  const preferred = str(payload.preferred_model, 100);
+  const harmonizeModels = FLUX2_ID.test(preferred) ? [preferred, ...flux2.filter((m) => m !== preferred)] : flux2;
+  const candidates = input.task === "harmonize" ? harmonizeModels : models;
 
-  for (const model of candidates) {
+  for (const [index, model] of candidates.entries()) {
     const remaining = deadline - Date.now();
     if (remaining < MIN_ATTEMPT_MS) break;
+    // Sisakan waktu untuk fallback bila masih ada kandidat berikutnya (mis. FLUX.2 dev lambat).
+    const isLast = index === candidates.length - 1;
+    const attemptTimeout = isLast ? remaining : Math.min(remaining, 40_000);
 
     let built: ReturnType<typeof buildBody>;
     try {
@@ -357,11 +368,16 @@ export async function POST(req: NextRequest) {
               headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
               body: JSON.stringify(built.body),
             }),
-        signal: AbortSignal.timeout(remaining),
+        signal: AbortSignal.timeout(attemptTimeout),
         cache: "no-store",
       });
     } catch (err) {
       if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        attempts.push({ model, status: null, message: `timeout setelah ${Math.round(attemptTimeout / 1000)} detik` });
+        if (!isLast && deadline - Date.now() >= MIN_ATTEMPT_MS) {
+          console.warn(`[generate] Model ${model} timeout; lanjut ke model berikutnya.`);
+          continue;
+        }
         return fail(504, "TIMEOUT", "Cloudflare Workers AI tidak merespons tepat waktu. Coba lagi beberapa saat lagi.", { attempts });
       }
       return fail(502, "NETWORK_ERROR", "Tidak dapat terhubung ke Cloudflare Workers AI.", {
