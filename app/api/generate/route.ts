@@ -9,11 +9,15 @@ export const maxDuration = 60;
  * stable-diffusion-xl-base-1.0, stable-diffusion-v1-5-inpainting, stable-diffusion-xl-lightning
  * dan dreamshaper-8-lcm; pengganti resminya flux-2-klein-9b. Route ini mencoba model
  * berikutnya bila model ditolak (410 / 404 / 400 / 5xx).
+ *
+ * Lisensi: FLUX.2 [klein] 4B berlisensi Apache 2.0 (aman untuk konten komersial), sedangkan
+ * klein 9B memakai FLUX Non-Commercial License -> 4B didahulukan. Untuk memakai 9B duluan,
+ * set CLOUDFLARE_AI_MODEL (pastikan lisensinya sesuai penggunaan Anda).
  * Override lewat env `CLOUDFLARE_AI_MODEL` (satu atau beberapa id dipisah koma).
  */
 const DEFAULT_MODELS = [
-  "@cf/black-forest-labs/flux-2-klein-9b",
   "@cf/black-forest-labs/flux-2-klein-4b",
+  "@cf/black-forest-labs/flux-2-klein-9b",
   "@cf/black-forest-labs/flux-1-schnell",
   "@cf/leonardo/lucid-origin",
   "@cf/leonardo/phoenix-1.0",
@@ -105,6 +109,11 @@ const isInpaintModel = (model: string) => model.includes("inpaint");
 
 /** Ukuran output per keluarga model (kelipatan 8, rasio 4:5 atau 1:1). */
 function sizeFor(family: "sd15" | "sdxl" | "leonardo" | "flux2", aspect: Aspect, quality: Quality) {
+  if (family === "flux2") {
+    // Rentang 256–1920, dibulatkan ke kelipatan 16. "high" 1088×1360 ≈ output feed 1080×1350.
+    const w = quality === "high" ? 1088 : 832;
+    return aspect === "4:5" ? { width: w, height: w * 1.25 } : { width: w, height: w };
+  }
   const base = family === "sd15" ? (quality === "high" ? 768 : 512) : quality === "high" ? 1024 : 768;
   return aspect === "4:5" ? { width: base, height: Math.round((base * 1.25) / 8) * 8 } : { width: base, height: base };
 }
@@ -134,8 +143,9 @@ function buildBody(model: string, input: GenInput): { body: Record<string, unkno
   }
 
   if (model.includes("/flux-2-")) {
-    // FLUX.2 (dev / klein) di Workers AI menerima multipart/form-data.
-    // Kirim field minimal: prompt, width, height, seed.
+    // FLUX.2 (dev / klein) di Workers AI wajib multipart/form-data (semua nilai string,
+    // Content-Type + boundary diisi otomatis oleh fetch). Klein memakai 4 step tetap,
+    // jadi field `steps` tidak dikirim. Output: JSON { result: { image: <base64> } }.
     const { width, height } = sizeFor("flux2", input.aspect, input.quality);
     return { mode: "backplate", multipart: true, body: { prompt: input.prompt, width, height, ...seed } };
   }
@@ -302,7 +312,7 @@ export async function POST(req: NextRequest) {
     const { message, json } = parseErrors(raw);
     const b64 = json?.result?.image ?? json?.image;
     if (upstream.ok && b64) {
-      const mime = b64.startsWith("/9j/") ? "image/jpeg" : "image/png";
+      const mime = b64.startsWith("/9j/") ? "image/jpeg" : b64.startsWith("UklGR") ? "image/webp" : "image/png";
       return ok(b64, mime);
     }
 

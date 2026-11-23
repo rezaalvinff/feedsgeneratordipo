@@ -15,7 +15,7 @@ Ubah foto studio mobil katalog (latar polos/hitam) menjadi foto komersial realis
    - Toggle **Debug view** menampilkan hasil isolasi, mask, input AI, dan output mentah AI.
 3. **Preset prompt otomotif.** Ada 5 preset (Jakarta Golden Hour, Highland Mountain Road, Luxury Showroom, Coastal Sunset Highway, Night City Street) plus Custom Prompt. Booster *"realistic environment reflections on glossy car paint, soft contact shadows under tires, 35mm lens, photorealistic…"* bisa di-toggle. Negative prompt, steps, guidance, strength, dan seed tersedia di Pengaturan lanjutan.
 4. **Generate** via `POST /api/generate` → Cloudflare Workers AI. Server mencoba model kandidat berurutan dan melewati model yang deprecated/tidak tersedia:
-   `flux-2-klein-9b` → `flux-2-klein-4b` → `flux-1-schnell` → `leonardo/lucid-origin` → `leonardo/phoenix-1.0`. Model FLUX.2 dikirimi `multipart/form-data`, model lain JSON. Model yang terpakai ditampilkan di UI, dan model yang gagal/deprecated dicatat di log Vercel. (SDXL base, SDXL Lightning, SD 1.5 inpainting dan DreamShaper sudah di-deprecate per 2026-11-20 sehingga tidak ada di daftar default.)
+   `flux-2-klein-4b` → `flux-2-klein-9b` → `flux-1-schnell` → `leonardo/lucid-origin` → `leonardo/phoenix-1.0`. Model FLUX.2 dikirimi `multipart/form-data`, model lain JSON. Model yang terpakai ditampilkan di UI, dan model yang gagal/deprecated dicatat di log Vercel. (SDXL base, SDXL Lightning, SD 1.5 inpainting dan DreamShaper sudah di-deprecate per 2026-11-20 sehingga tidak ada di daftar default.)
 5. **Integrasi & export.** Mobil resolusi asli ditempel di atas latar AI. Yang bisa diatur: **bayangan kontak ban** (siluet di-squash + blur), **pantulan lantai** (showroom/aspal basah), **pantulan lingkungan di cat** (latar dicerminkan + blur, soft-light), *ambient color blend*, dan kelembutan tepi. Lalu Before vs After berdampingan, Auto-Crop (fokus ke mobil) atau Fit (latar blur) ke 4:5 / 1:1, watermark logo (upload/tempel, 4 pojok), dan download JPG/PNG high-res sekali klik.
 
 ## Setup lokal
@@ -65,6 +65,7 @@ Respons error: `{ error, code, details?, attempts? }`, dengan `code` salah satu 
 ## Catatan
 
 - **Model masking** (~40–170MB tergantung varian Cepat/Seimbang/Terbaik) diunduh sekali dari CDN `staticimgly.com` lalu di-cache browser. Kalau CDN diblokir jaringan/ad-blocker, pakai fallback *latar polos*.
+- **Lisensi model gambar:** FLUX.2 [klein] 4B berlisensi Apache 2.0, sedangkan klein 9B memakai FLUX Non-Commercial License. Karena itu 4B didahulukan untuk konten promo komersial.
 - **Lisensi:** `@imgly/background-removal` berlisensi **AGPL-3.0**. Untuk penggunaan komersial closed-source, cek lisensi komersial dari IMG.LY.
 - Foto tidak disimpan di server. Gambar hanya diteruskan ke Cloudflare untuk proses generate.
 - Free tier Workers AI memberi 10.000 neurons/hari. Biaya per gambar berbeda-beda per model.
