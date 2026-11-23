@@ -2,7 +2,9 @@
 
 Ubah foto studio mobil katalog (latar polos/hitam) menjadi foto komersial realistis untuk **Instagram Feed** (4:5 `1080×1350` / 1:1 `1080×1080`) dengan latar baru hasil AI.
 
-**Stack:** Next.js 16 (App Router) · TypeScript · Tailwind CSS v4 · `@imgly/background-removal` (di browser) · HTML5 Canvas · Cloudflare Workers AI (`@cf/runwayml/stable-diffusion-v1-5-inpainting`).
+**Stack:** Next.js 16 (App Router) · TypeScript · Tailwind CSS v4 · `@imgly/background-removal` (di browser) · HTML5 Canvas · Cloudflare Workers AI (text-to-image, fallback model otomatis).
+
+> **Catatan model:** `@cf/runwayml/stable-diffusion-v1-5-inpainting` di-*deprecate* Cloudflare pada 2026-11-20 (HTTP 410). Karena itu aplikasi kini memakai **mode backplate**: AI menggambar latar kosong, lalu mobil resolusi asli ditempel di browser dengan bayangan kontak & pantulan buatan Canvas. Mode inpainting masih didukung bila Anda mengisi `CLOUDFLARE_AI_MODEL` dengan model inpainting yang aktif.
 
 ## Alur kerja
 
@@ -12,8 +14,9 @@ Ubah foto studio mobil katalog (latar polos/hitam) menjadi foto komersial realis
    - **mask**: mobil **hitam `#000`** (dikunci), latar **putih `#FFF`** (digambar ulang), dengan *feathering* gaussian ±3–4px di tepi agar pantulan & cahaya menyatu.
    - Toggle **Debug view** menampilkan hasil isolasi, mask, input AI, dan output mentah AI.
 3. **Preset prompt otomotif.** Ada 5 preset (Jakarta Golden Hour, Highland Mountain Road, Luxury Showroom, Coastal Sunset Highway, Night City Street) plus Custom Prompt. Booster *"realistic environment reflections on glossy car paint, soft contact shadows under tires, 35mm lens, photorealistic…"* bisa di-toggle. Negative prompt, steps, guidance, strength, dan seed tersedia di Pengaturan lanjutan.
-4. **Generate** via `POST /api/generate` → Cloudflare Workers AI.
-5. **Framing & export.** Before vs After berdampingan, Auto-Crop (fokus ke mobil) atau Fit (latar blur) ke 4:5 / 1:1, dan watermark logo (upload/tempel, 4 pojok, ukuran/opacity/margin). Opsi **Pertahankan detail mobil** menempel ulang mobil resolusi asli di atas hasil AI (SD 1.5 hanya ~512px), dengan tepi lembut + *ambient color blend*. Download JPG/PNG high-res sekali klik.
+4. **Generate** via `POST /api/generate` → Cloudflare Workers AI. Server mencoba model kandidat berurutan dan melewati model yang deprecated/tidak tersedia:
+   `flux-1-schnell` → `leonardo/phoenix-1.0` → `leonardo/lucid-origin` → `sdxl-lightning` → `sdxl-base-1.0` → `dreamshaper-8-lcm`. Model yang terpakai ditampilkan di UI.
+5. **Integrasi & export.** Mobil resolusi asli ditempel di atas latar AI. Yang bisa diatur: **bayangan kontak ban** (siluet di-squash + blur), **pantulan lantai** (showroom/aspal basah), **pantulan lingkungan di cat** (latar dicerminkan + blur, soft-light), *ambient color blend*, dan kelembutan tepi. Lalu Before vs After berdampingan, Auto-Crop (fokus ke mobil) atau Fit (latar blur) ke 4:5 / 1:1, watermark logo (upload/tempel, 4 pojok), dan download JPG/PNG high-res sekali klik.
 
 ## Setup lokal
 
@@ -32,6 +35,7 @@ CLOUDFLARE_API_TOKEN=
 
 - **Account ID**: Cloudflare Dashboard → *Workers & Pages* (atau *AI*) → Account ID di sidebar kanan.
 - **API Token**: *My Profile → API Tokens → Create Token* → template **Workers AI** (permission `Workers AI: Read`).
+- Opsional: `CLOUDFLARE_AI_MODEL` (paksa model/daftar model, dipisah koma) dan `CLOUDFLARE_API_BASE_URL` (lewat AI Gateway). Lihat `.env.example`.
 
 Badge di header menampilkan status konfigurasi (`GET /api/generate` → `{ configured: boolean }`, nilai secret tidak pernah dikirim ke browser).
 
@@ -47,31 +51,29 @@ Body JSON:
 
 | field | tipe | keterangan |
 |---|---|---|
-| `image` | string | data URL / base64 PNG atau JPG (maks 3MB) |
-| `mask` | string | data URL / base64 PNG, hitam = dikunci, putih = digambar ulang |
-| `prompt` | string | wajib |
+| `prompt` | string | wajib. Prompt latar kosong (mode backplate) |
 | `negative_prompt` | string | opsional |
-| `width`, `height` | number | 256–1024, kelipatan 8 |
-| `num_steps` | number | 1–20 (default 20) |
-| `guidance` | number | default 7.5 |
-| `strength` | number | 0–1 (default 1) |
-| `seed` | number | opsional |
+| `inpaint_prompt`, `inpaint_negative_prompt` | string | dipakai bila model inpainting |
+| `image`, `mask` | string | data URL / base64 PNG/JPG (maks 3MB). Wajib hanya untuk model inpainting. Mask: hitam = dikunci, putih = digambar ulang |
+| `aspect` | `"4:5"` \| `"1:1"` | ukuran generasi disesuaikan per model |
+| `quality` | `"standard"` \| `"high"` | |
+| `num_steps`, `guidance`, `strength`, `seed` | number | dipetakan ke parameter masing-masing model |
 
-Respons sukses: `{ image: "data:image/png;base64,...", seed, model }`.
-Respons error: `{ error, code, details? }`, dengan `code` salah satu dari `MISSING_ENV` (500), `INVALID_REQUEST` (400), `UNAUTHORIZED` (401), `RATE_LIMITED` (429, termasuk kuota harian neurons habis), `TIMEOUT` (504), `NETWORK_ERROR` / `UPSTREAM_ERROR` (502).
+Respons sukses: `{ image: "data:image/...;base64,...", model, mode: "backplate" | "inpaint", seed, attempts }`.
+Respons error: `{ error, code, details?, attempts? }`, dengan `code` salah satu dari `MISSING_ENV` (500), `INVALID_REQUEST` (400), `UNAUTHORIZED` (401), `RATE_LIMITED` (429), `TIMEOUT` (504), `NETWORK_ERROR` / `UPSTREAM_ERROR` (502). `attempts` berisi daftar model yang dicoba beserta pesan error-nya.
 
 ## Catatan
 
 - **Model masking** (~40–170MB tergantung varian Cepat/Seimbang/Terbaik) diunduh sekali dari CDN `staticimgly.com` lalu di-cache browser. Kalau CDN diblokir jaringan/ad-blocker, pakai fallback *latar polos*.
 - **Lisensi:** `@imgly/background-removal` berlisensi **AGPL-3.0**. Untuk penggunaan komersial closed-source, cek lisensi komersial dari IMG.LY.
 - Foto tidak disimpan di server. Gambar hanya diteruskan ke Cloudflare untuk proses generate.
-- Free tier Workers AI memberi 10.000 neurons/hari. Satu generate SD 1.5 inpainting memakai sebagian kecil dari kuota itu.
+- Free tier Workers AI memberi 10.000 neurons/hari. Biaya per gambar berbeda-beda per model.
 
 ## Struktur
 
 ```
 app/
-  api/generate/route.ts   # proxy ke Cloudflare Workers AI + error handling
+  api/generate/route.ts   # proxy ke Cloudflare Workers AI + fallback model + error handling
   layout.tsx, page.tsx, globals.css
 components/
   Studio.tsx              # UI utama & state

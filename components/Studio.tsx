@@ -4,11 +4,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Dropzone, { pickImageFile } from "./Dropzone";
 import { Alert, Button, CanvasView, Section, Segmented, Slider, Spinner, Toggle, cx } from "./ui";
 import {
-  AUTOMOTIVE_BOOSTER,
+  BACKPLATE_BOOSTER,
+  BACKPLATE_NEGATIVE_EXTRA,
   CUSTOM_PRESET_ID,
   DEFAULT_NEGATIVE_PROMPT,
+  INPAINT_NEGATIVE_EXTRA,
   SCENE_PRESETS,
-  buildPrompt,
+  buildBackplatePrompt,
+  buildInpaintPrompt,
+  joinNegative,
 } from "@/lib/presets";
 import { blobToDataURL, canvasToBlob, hasMeaningfulTransparency, imageToCanvas, loadImage, trimTransparent } from "@/lib/image";
 import {
@@ -30,6 +34,7 @@ import {
   type Aspect,
   type FitMode,
   type GenQuality,
+  type GenerationMode,
   type Layout,
   type NormRect,
   type WatermarkPosition,
@@ -51,6 +56,8 @@ interface GenResult {
   aspect: Aspect;
   seed: number;
   prompt: string;
+  model: string;
+  mode: GenerationMode;
 }
 
 interface ApiError {
@@ -58,6 +65,8 @@ interface ApiError {
   code?: string;
   details?: string;
 }
+
+const shortModel = (id: string) => id.replace(/^@cf\//, "");
 
 const MAX_SOURCE_DIM = 2048;
 const MAX_RESULTS = 6;
@@ -110,6 +119,9 @@ export default function Studio() {
 
   // ---------- 5. Framing & export ----------
   const [preserveCar, setPreserveCar] = useState(true);
+  const [shadowStrength, setShadowStrength] = useState(0.75);
+  const [paintReflection, setPaintReflection] = useState(0.25);
+  const [floorReflection, setFloorReflection] = useState(0);
   const [ambientTint, setAmbientTint] = useState(0.18);
   const [edgeSoftness, setEdgeSoftness] = useState(1.5);
   const [exportAspect, setExportAspect] = useState<Aspect>("4:5");
@@ -273,9 +285,17 @@ export default function Studio() {
   const sceneCanvas = useMemo(
     () =>
       selected && cutout
-        ? composeScene(selected.image, cutout, selected.rect, selected.aspect, { preserveCar, ambientTint, edgeSoftness })
+        ? composeScene(selected.image, cutout, selected.rect, selected.aspect, {
+            mode: selected.mode,
+            preserveCar,
+            ambientTint,
+            edgeSoftness,
+            shadowStrength,
+            paintReflection,
+            floorReflection,
+          })
         : null,
-    [selected, cutout, preserveCar, ambientTint, edgeSoftness],
+    [selected, cutout, preserveCar, ambientTint, edgeSoftness, shadowStrength, paintReflection, floorReflection],
   );
   const framed = useMemo(
     () => (sceneCanvas && selected ? frameForInstagram(sceneCanvas, exportAspect, fitMode, rectCenter(selected.rect)) : null),
@@ -289,7 +309,7 @@ export default function Studio() {
     [framed, logo, wmPosition, wmSize, wmOpacity, wmMargin],
   );
 
-  const finalPrompt = buildPrompt(scene, useBooster);
+  const finalPrompt = buildBackplatePrompt(scene, useBooster);
   const compositionChanged =
     !!selected && !!inpaint && (selected.aspect !== inpaint.aspect || JSON.stringify(selected.rect) !== JSON.stringify(inpaint.rect));
 
@@ -330,16 +350,18 @@ export default function Studio() {
           image: snapshot.image.toDataURL("image/png"),
           mask: snapshot.mask.toDataURL("image/png"),
           prompt: finalPrompt,
-          negative_prompt: negativePrompt,
-          width: snapshot.width,
-          height: snapshot.height,
+          negative_prompt: joinNegative(negativePrompt, BACKPLATE_NEGATIVE_EXTRA),
+          inpaint_prompt: buildInpaintPrompt(scene, useBooster),
+          inpaint_negative_prompt: joinNegative(negativePrompt, INPAINT_NEGATIVE_EXTRA),
+          aspect: snapshot.aspect,
+          quality: genQuality === 768 ? "high" : "standard",
           num_steps: steps,
           guidance,
           strength,
           seed: usedSeed,
         }),
       });
-      const json = (await res.json().catch(() => null)) as (ApiError & { image?: string }) | null;
+      const json = (await res.json().catch(() => null)) as (ApiError & { image?: string; model?: string; mode?: GenerationMode }) | null;
       if (!res.ok || !json?.image) {
         if (json?.code === "MISSING_ENV") setConfigured(false);
         setGenError(json ?? { error: `Server mengembalikan HTTP ${res.status}.` });
@@ -354,6 +376,8 @@ export default function Studio() {
         aspect: snapshot.aspect,
         seed: usedSeed,
         prompt: finalPrompt,
+        model: json.model ?? "unknown",
+        mode: json.mode === "inpaint" ? "inpaint" : "backplate",
       };
       setResults((prev) => [result, ...prev].slice(0, MAX_RESULTS));
       setSelectedId(result.id);
@@ -564,8 +588,8 @@ export default function Studio() {
                   value={genQuality}
                   onChange={setGenQuality}
                   options={[
-                    { value: 512, label: aspect === "4:5" ? "512×640 · cepat" : "512×512 · cepat" },
-                    { value: 768, label: aspect === "4:5" ? "768×960 · detail" : "768×768 · detail" },
+                    { value: 512, label: "Standar · cepat" },
+                    { value: 768, label: "Tinggi · detail" },
                   ]}
                 />
               </div>
@@ -612,7 +636,7 @@ export default function Studio() {
             <div className="mt-4">
               <div className="mb-1.5 flex items-center justify-between">
                 <label htmlFor="scene" className="text-xs text-zinc-400">
-                  Deskripsi latar (English)
+                  Deskripsi lokasi (English, tanpa mobil)
                   {sceneModified && <span className="ml-2 rounded bg-accent-500/15 px-1.5 py-0.5 text-[10px] text-accent-300">dimodifikasi</span>}
                 </label>
                 {sceneModified && activePreset && (
@@ -626,7 +650,7 @@ export default function Studio() {
                 rows={4}
                 value={scene}
                 onChange={(e) => setScene(e.target.value)}
-                placeholder="e.g. a car parked in front of a modern villa in Bali, tropical palm trees, bright daylight"
+                placeholder="e.g. the driveway of a modern villa in Bali, tropical palm trees, bright daylight"
                 className="w-full resize-y rounded-xl border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-xs leading-relaxed text-zinc-100 placeholder:text-zinc-600 focus:border-accent-500/60 focus:outline-none"
               />
             </div>
@@ -634,7 +658,7 @@ export default function Studio() {
             <div className="mt-3">
               <Toggle
                 label="Booster fotografi otomotif"
-                description={AUTOMOTIVE_BOOSTER}
+                description={BACKPLATE_BOOSTER}
                 checked={useBooster}
                 onChange={setUseBooster}
               />
@@ -680,7 +704,7 @@ export default function Studio() {
           </Section>
 
           {/* 4. Generate */}
-          <Section step={4} title="Generate" subtitle="Cloudflare Workers AI · stable-diffusion-v1-5-inpainting" disabled={!cutout}>
+          <Section step={4} title="Generate" subtitle="Cloudflare Workers AI · model aktif dipilih otomatis" disabled={!cutout}>
             <Button variant="primary" className="w-full py-3" onClick={generate} disabled={!inpaint || generating}>
               {generating ? (
                 <>
@@ -695,6 +719,12 @@ export default function Studio() {
             <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
               <span className="text-zinc-400">Prompt final:</span> {finalPrompt || "—"}
             </p>
+            {selected && (
+              <p className="mt-1 text-[11px] text-zinc-500">
+                <span className="text-zinc-400">Model terpakai:</span> {shortModel(selected.model)} ·{" "}
+                {selected.mode === "inpaint" ? "inpainting" : "backplate + komposit Canvas"} · seed {selected.seed}
+              </p>
+            )}
             {compositionChanged && !generating && (
               <div className="mt-3">
                 <Alert tone="info" title="Komposisi berubah">
@@ -706,7 +736,7 @@ export default function Studio() {
               <div className="mt-3">
                 <Alert title={genError.code ? `Gagal generate (${genError.code})` : "Gagal generate"}>
                   <p>{genError.error}</p>
-                  {genError.details && <p className="mt-1 break-words font-mono text-[10px] opacity-75">{genError.details}</p>}
+                  {genError.details && <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[10px] opacity-75">{genError.details}</p>}
                 </Alert>
               </div>
             )}
@@ -863,14 +893,24 @@ export default function Studio() {
                     ]}
                   />
                 </div>
-                <Toggle
-                  label="Pertahankan detail mobil (high-res)"
-                  description="Tempel ulang mobil resolusi asli di atas hasil AI agar emblem, velg & lampu tetap tajam."
-                  checked={preserveCar}
-                  onChange={setPreserveCar}
-                />
-                {preserveCar && (
+                {selected?.mode === "inpaint" && (
+                  <Toggle
+                    label="Pertahankan detail mobil (high-res)"
+                    description="Tempel ulang mobil resolusi asli di atas hasil AI agar emblem, velg & lampu tetap tajam."
+                    checked={preserveCar}
+                    onChange={setPreserveCar}
+                  />
+                )}
+                {(selected?.mode !== "inpaint" || preserveCar) && (
                   <>
+                    <p className="text-xs font-medium text-zinc-200">Integrasi mobil ke latar</p>
+                    {selected?.mode !== "inpaint" && (
+                      <>
+                        <Slider label="Bayangan kontak ban" value={shadowStrength} min={0} max={1} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setShadowStrength} />
+                        <Slider label="Pantulan lantai (showroom / aspal basah)" value={floorReflection} min={0} max={0.5} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setFloorReflection} />
+                      </>
+                    )}
+                    <Slider label="Pantulan lingkungan di cat" value={paintReflection} min={0} max={0.6} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setPaintReflection} />
                     <Slider label="Ambient color blend" value={ambientTint} min={0} max={0.5} step={0.01} format={(v) => `${Math.round(v * 100)}%`} onChange={setAmbientTint} />
                     <Slider label="Kelembutan tepi mobil" value={edgeSoftness} min={0.5} max={5} step={0.25} format={(v) => `${v}px`} onChange={setEdgeSoftness} />
                   </>

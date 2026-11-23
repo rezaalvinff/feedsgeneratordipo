@@ -129,20 +129,33 @@ export function buildCompositionPreview(cutout: HTMLCanvasElement, aspect: Aspec
   return c;
 }
 
+export type GenerationMode = "backplate" | "inpaint";
+
 export interface ComposeOptions {
-  /** Tempel ulang mobil resolusi tinggi agar detail tetap tajam (SD menghasilkan 512–768px). */
+  /**
+   * backplate: AI menggambar latar kosong -> mobil selalu ditempel + bayangan/pantulan via Canvas.
+   * inpaint  : AI sudah menggambar latar di sekitar mobil -> overlay mobil opsional.
+   */
+  mode: GenerationMode;
+  /** Tempel ulang mobil resolusi tinggi (wajib di mode backplate). */
   preserveCar: boolean;
   /** Kekuatan tint warna ambient latar ke bodi mobil (0–0.5). */
   ambientTint: number;
   /** Feather tepi overlay pada resolusi output (px). */
   edgeSoftness: number;
+  /** Kekuatan bayangan kontak di bawah mobil/ban (0–1). */
+  shadowStrength: number;
+  /** Pantulan lingkungan di cat mobil (0–0.6). */
+  paintReflection: number;
+  /** Pantulan mobil di lantai (lantai mengkilap / aspal basah) (0–0.5). */
+  floorReflection: number;
 }
 
-function averageBackgroundColor(ai: CanvasImageSource, carLayer: HTMLCanvasElement | null): [number, number, number] {
+function averageBackgroundColor(bg: CanvasImageSource, carLayer: HTMLCanvasElement | null): [number, number, number] {
   const sw = 24, sh = 30;
   const s = createCanvas(sw, sh);
   const sctx = get2d(s, true);
-  sctx.drawImage(ai, 0, 0, sw, sh);
+  sctx.drawImage(bg, 0, 0, sw, sh);
   const d = sctx.getImageData(0, 0, sw, sh).data;
   let carA: Uint8ClampedArray | null = null;
   if (carLayer) {
@@ -159,6 +172,91 @@ function averageBackgroundColor(ai: CanvasImageSource, carLayer: HTMLCanvasEleme
   return n > 0 ? [r / n, g / n, b / n] : [128, 128, 128];
 }
 
+/** Gambar sumber memenuhi W×H (object-fit: cover). */
+function drawCover(ctx: CanvasRenderingContext2D, img: CanvasImageSource & { width: number; height: number }, W: number, H: number) {
+  const iw = (img as HTMLImageElement).naturalWidth || img.width;
+  const ih = (img as HTMLImageElement).naturalHeight || img.height;
+  const s = Math.max(W / iw, H / ih);
+  ctx.drawImage(img, (W - iw * s) / 2, (H - ih * s) / 2, iw * s, ih * s);
+}
+
+/** Blur murah: perkecil lalu perbesar kembali dengan smoothing. */
+function cheapBlur(src: HTMLCanvasElement, factor: number): HTMLCanvasElement {
+  const small = createCanvas(src.width / factor, src.height / factor);
+  get2d(small).drawImage(src, 0, 0, small.width, small.height);
+  const out = createCanvas(src.width, src.height);
+  get2d(out).drawImage(small, 0, 0, out.width, out.height);
+  return out;
+}
+
+/** Siluet hitam dari layer mobil, di-squash vertikal & di-blur -> bayangan kontak. */
+function drawContactShadow(ctx: CanvasRenderingContext2D, carLayer: HTMLCanvasElement, rect: NormRect, W: number, H: number, strength: number) {
+  if (strength <= 0) return;
+  const cx = rect.x * W, cy = rect.y * H, cw = rect.w * W, ch = rect.h * H;
+  const bottom = cy + ch;
+  const padX = cw * 0.12;
+  const regionW = Math.ceil(cw + padX * 2);
+  const regionH = Math.ceil(ch * 0.5);
+  const regionY = bottom - regionH * 0.5;
+
+  const layers = [
+    // bayangan ambient lebar & lembut dari seluruh siluet
+    { srcFrac: 1, height: 0.16, offset: 0.55, sigma: ch * 0.035, alpha: 0.55 },
+    // bayangan kontak rapat dari bagian bawah (ban)
+    { srcFrac: 0.14, height: 0.045, offset: 0.6, sigma: ch * 0.01, alpha: 0.9 },
+  ];
+
+  for (const l of layers) {
+    const tmp = createCanvas(regionW, regionH);
+    const t = get2d(tmp, true);
+    const sy = cy + ch * (1 - l.srcFrac);
+    const sh = ch * l.srcFrac;
+    const dh = ch * l.height;
+    const dy = bottom - regionY - dh * l.offset;
+    t.drawImage(carLayer, cx, sy, cw, sh, padX, dy, cw, dh);
+    t.globalCompositeOperation = "source-in";
+    t.fillStyle = "#000";
+    t.fillRect(0, 0, regionW, regionH);
+    const data = t.getImageData(0, 0, regionW, regionH);
+    const blurred = gaussianBlurChannel(extractAlpha(data), regionW, regionH, Math.max(1, l.sigma));
+    for (let i = 0, j = 3; i < blurred.length; i++, j += 4) data.data[j] = blurred[i];
+    t.globalCompositeOperation = "source-over";
+    t.putImageData(data, 0, 0);
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, l.alpha * strength);
+    ctx.drawImage(tmp, cx - padX, regionY);
+    ctx.restore();
+  }
+}
+
+/** Pantulan mobil di lantai: dicerminkan di garis ban, memudar ke bawah. */
+function drawFloorReflection(ctx: CanvasRenderingContext2D, carLayer: HTMLCanvasElement, rect: NormRect, W: number, H: number, amount: number) {
+  if (amount <= 0) return;
+  const cy = rect.y * H, ch = rect.h * H;
+  const bottom = cy + ch;
+  const fadeH = ch * 0.45;
+  const tmp = createCanvas(W, H);
+  const t = get2d(tmp);
+  t.save();
+  t.translate(0, bottom * 2);
+  t.scale(1, -1);
+  t.drawImage(carLayer, 0, 0);
+  t.restore();
+  t.globalCompositeOperation = "destination-in";
+  const g = t.createLinearGradient(0, bottom, 0, bottom + fadeH);
+  g.addColorStop(0, "rgba(0,0,0,1)");
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  t.fillStyle = g;
+  t.fillRect(0, bottom, W, fadeH);
+  // buang area di atas garis ban
+  t.globalCompositeOperation = "destination-out";
+  t.fillRect(0, 0, W, bottom);
+  ctx.save();
+  ctx.globalAlpha = amount;
+  ctx.drawImage(cheapBlur(tmp, 3), 0, 0);
+  ctx.restore();
+}
+
 /** Komposit akhir pada resolusi output (1080 lebar). */
 export function composeScene(
   ai: HTMLImageElement | HTMLCanvasElement,
@@ -170,8 +268,12 @@ export function composeScene(
   const { width: W, height: H } = OUTPUT_SIZES[aspect];
   const scene = createCanvas(W, H);
   const ctx = get2d(scene);
-  ctx.drawImage(ai, 0, 0, W, H);
-  if (!opts.preserveCar) return scene;
+  drawCover(ctx, ai, W, H);
+  const overlay = opts.mode === "backplate" || opts.preserveCar;
+  if (!overlay) return scene;
+
+  // Snapshot latar (untuk warna ambient & pantulan cat)
+  const background = cloneCanvas(scene);
 
   // Layer mobil resolusi tinggi dengan tepi di-erode + feather (min(alpha, blur(alpha)))
   const car = createCanvas(W, H);
@@ -182,18 +284,42 @@ export function composeScene(
   const blurred = gaussianBlurChannel(a, W, H, Math.max(0.5, opts.edgeSoftness));
   for (let i = 0, j = 3; i < a.length; i++, j += 4) data.data[j] = Math.min(a[i], blurred[i]);
   cctx.putImageData(data, 0, 0);
+  const carShape = cloneCanvas(car);
+
+  if (opts.mode === "backplate") {
+    drawFloorReflection(ctx, carShape, rect, W, H, opts.floorReflection);
+    drawContactShadow(ctx, carShape, rect, W, H, opts.shadowStrength);
+  }
+
+  // Pantulan lingkungan di cat: latar dicerminkan vertikal + diblur, soft-light di atas bodi.
+  if (opts.paintReflection > 0) {
+    const env = createCanvas(W, H);
+    const e = get2d(env);
+    e.translate(0, H);
+    e.scale(1, -1);
+    e.drawImage(background, 0, 0);
+    cctx.save();
+    cctx.globalCompositeOperation = "soft-light";
+    cctx.globalAlpha = opts.paintReflection;
+    cctx.drawImage(cheapBlur(env, 12), 0, 0);
+    cctx.restore();
+  }
 
   if (opts.ambientTint > 0) {
-    const [r, g, b] = averageBackgroundColor(ai, car);
-    const original = cloneCanvas(car);
+    const [r, g, b] = averageBackgroundColor(background, carShape);
     cctx.save();
     cctx.globalCompositeOperation = "soft-light";
     cctx.globalAlpha = opts.ambientTint;
     cctx.fillStyle = `rgb(${r | 0}, ${g | 0}, ${b | 0})`;
     cctx.fillRect(0, 0, W, H);
-    cctx.globalAlpha = 1;
+    cctx.restore();
+  }
+
+  // Kembalikan alpha asli mobil (soft-light ikut mewarnai area transparan)
+  if (opts.paintReflection > 0 || opts.ambientTint > 0) {
+    cctx.save();
     cctx.globalCompositeOperation = "destination-in";
-    cctx.drawImage(original, 0, 0);
+    cctx.drawImage(carShape, 0, 0);
     cctx.restore();
   }
 
