@@ -1,0 +1,31 @@
+{
+  "name": "automotive-feeds-generator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Turn studio car catalog photos into realistic Instagram feed images with AI-generated backgrounds.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "dependencies": {
+    "@imgly/background-removal": "^1.7.0",
+    "next": "^16.4.6",
+    "onnxruntime-web": "1.21.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.5",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "postcss": "^8.5.33",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^5.9.3"
+  }
+}
