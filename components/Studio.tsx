@@ -12,6 +12,7 @@ import {
   SCENE_PRESETS,
   buildBackplatePrompt,
   buildHarmonizePrompt,
+  buildRealPhotoPrompt,
   buildInpaintPrompt,
   joinNegative,
 } from "@/lib/presets";
@@ -61,7 +62,10 @@ interface GenResult {
   mode: GenerationMode;
   /** Untuk hasil harmonisasi: id hasil backplate/inpaint sumbernya. */
   sourceId?: string;
+  realism?: Realism;
 }
+
+type Realism = "strong" | "subtle";
 
 interface ApiError {
   error?: string;
@@ -131,6 +135,7 @@ export default function Studio() {
   const [grain, setGrain] = useState(0.25);
   const [vignette, setVignette] = useState(0.2);
   const [detailRestore, setDetailRestore] = useState(0.7);
+  const [realism, setRealism] = useState<Realism>("strong");
   const [busyTask, setBusyTask] = useState<"generate" | "harmonize">("generate");
   const [ambientTint, setAmbientTint] = useState(0.18);
   const [edgeSoftness, setEdgeSoftness] = useState(1.5);
@@ -425,13 +430,32 @@ export default function Studio() {
       const refH = src.aspect === "4:5" ? 500 : 496;
       const ref = createCanvas(refW, refH);
       get2d(ref).drawImage(composite, 0, 0, refW, refH);
+      // Mode kuat: foto mobil asli sebagai referensi ke-2 (identitas model), muat dalam 496px.
+      const extraRefs: string[] = [];
+      if (realism === "strong") {
+        const k = Math.min(496 / cutout.width, 496 / cutout.height);
+        const carRef = createCanvas(cutout.width * k + 16, cutout.height * k + 16);
+        const cr = get2d(carRef);
+        cr.fillStyle = "#808080";
+        cr.fillRect(0, 0, carRef.width, carRef.height);
+        cr.drawImage(cutout, 8, 8, cutout.width * k, cutout.height * k);
+        if (carRef.width > 511 || carRef.height > 511) {
+          const s2 = createCanvas(Math.min(511, carRef.width), Math.min(511, carRef.height));
+          get2d(s2).drawImage(carRef, 0, 0, s2.width, s2.height);
+          extraRefs.push(s2.toDataURL("image/jpeg", 0.92));
+        } else {
+          extraRefs.push(carRef.toDataURL("image/jpeg", 0.92));
+        }
+      }
+      const harmPrompt = realism === "strong" ? buildRealPhotoPrompt(scene) : buildHarmonizePrompt(scene);
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           task: "harmonize",
           reference_image: ref.toDataURL("image/jpeg", 0.92),
-          prompt: buildHarmonizePrompt(scene),
+          extra_reference_images: extraRefs,
+          prompt: harmPrompt,
           aspect: src.aspect,
           quality: genQuality === 768 ? "high" : "standard",
           seed: usedSeed,
@@ -449,11 +473,14 @@ export default function Studio() {
         rect: src.rect,
         aspect: src.aspect,
         seed: usedSeed,
-        prompt: buildHarmonizePrompt(scene),
+        prompt: harmPrompt,
         model: json.model ?? "unknown",
         mode: "harmonized",
         sourceId: src.id,
+        realism,
       };
+      // Kuat: biarkan mobil hasil AI apa adanya (tekstur CGI asli tidak ditempel ulang).
+      setDetailRestore(realism === "strong" ? 0 : 0.7);
       setResults((prev) => [result, ...prev].slice(0, MAX_RESULTS));
       setSelectedId(result.id);
     } catch (err) {
@@ -800,7 +827,7 @@ export default function Studio() {
                 {selected.mode === "inpaint"
                   ? "inpainting"
                   : selected.mode === "harmonized"
-                    ? "harmonisasi AI + detail asli"
+                    ? `harmonisasi AI (${selected.realism === "strong" ? "kuat, mobil dirender ulang" : "halus + detail asli"})`
                     : "backplate + komposit Canvas"}{" "}
                 · seed {selected.seed}
               </p>
@@ -809,9 +836,24 @@ export default function Studio() {
               <div className="mt-4 rounded-xl border border-accent-500/30 bg-accent-500/5 p-3">
                 <p className="text-xs font-semibold text-zinc-100">✨ Harmonisasi AI: jadikan foto asli</p>
                 <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
-                  Komposit dikirim ke FLUX.2 sebagai referensi untuk dirender ulang menjadi satu foto: cahaya mobil disesuaikan,
-                  pantulan & bayangan natural. Detail halus mobil (emblem, velg) dikembalikan dari foto asli. Pakai 1× kuota generate lagi.
+                  Komposit dikirim ke FLUX.2 untuk dirender ulang menjadi satu foto asli. Pakai 1× kuota generate lagi.
                 </p>
+                <div className="mt-3">
+                  <Segmented<Realism>
+                    size="sm"
+                    value={realism}
+                    onChange={setRealism}
+                    options={[
+                      { value: "strong", label: "Kuat · mobil dirender ulang" },
+                      { value: "subtle", label: "Halus · jaga detail asli" },
+                    ]}
+                  />
+                  <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-500">
+                    {realism === "strong"
+                      ? "Paling seperti foto asli. Cocok untuk foto katalog render 3D/CGI. Detail kecil (tulisan emblem, plat) bisa sedikit berubah."
+                      : "Hanya menyesuaikan cahaya & warna. Mobil hampir identik dengan foto asli, termasuk tampilan CGI-nya."}
+                  </p>
+                </div>
                 <Button className="mt-3 w-full border-accent-500/50" onClick={harmonize} disabled={generating}>
                   {generating && busyTask === "harmonize" ? (
                     <>
@@ -1014,7 +1056,7 @@ export default function Studio() {
                 )}
                 {selected?.mode === "harmonized" && (
                   <p className="text-[11px] leading-relaxed text-zinc-500">
-                    Bila muncul garis ganda/ghosting di bodi, posisi mobil hasil AI sedikit bergeser. Turunkan slider di atas.
+                    0% = mobil murni hasil AI (paling natural). Naikkan bila emblem/tulisan berubah. Bila muncul garis ganda, turunkan lagi.
                   </p>
                 )}
                 {selected?.mode !== "harmonized" && (selected?.mode !== "inpaint" || preserveCar) && (

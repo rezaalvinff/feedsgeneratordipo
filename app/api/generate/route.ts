@@ -110,6 +110,8 @@ interface GenInput {
   task: Task;
   /** Komposit (mobil + latar) untuk pass harmonisasi FLUX.2. */
   reference?: Uint8Array;
+  /** Referensi tambahan (mis. foto mobil asli) -> input_image_1..3. */
+  extraReferences?: Uint8Array[];
 }
 
 /** Baca dimensi PNG/JPEG dari header (tanpa dependency). */
@@ -174,7 +176,14 @@ function buildBody(model: string, input: GenInput): { body: Record<string, unkno
     return {
       mode: "harmonized",
       multipart: true,
-      body: { prompt: input.prompt, width, height, ...seed, input_image_0: input.reference },
+      body: {
+        prompt: input.prompt,
+        width,
+        height,
+        ...seed,
+        input_image_0: input.reference,
+        ...Object.fromEntries((input.extraReferences ?? []).map((img, i) => [`input_image_${i + 1}`, img])),
+      },
     };
   }
 
@@ -299,11 +308,18 @@ export async function POST(req: NextRequest) {
     if (payload.image !== undefined) input.image = decodeImage(payload.image, "image");
     if (payload.mask !== undefined) input.mask = decodeImage(payload.mask, "mask");
     if (input.task === "harmonize") {
-      input.reference = decodeImage(payload.reference_image, "reference_image");
-      const size = imageSize(input.reference);
-      if (!size || size.width > MAX_REFERENCE_SIDE || size.height > MAX_REFERENCE_SIDE) {
-        throw new RequestError(`reference_image harus lebih kecil dari 512×512 (diterima ${size ? `${size.width}×${size.height}` : "ukuran tidak terbaca"}).`);
-      }
+      const checkRef = (value: unknown, field: string) => {
+        const buf = decodeImage(value, field);
+        const size = imageSize(buf);
+        if (!size || size.width > MAX_REFERENCE_SIDE || size.height > MAX_REFERENCE_SIDE) {
+          throw new RequestError(`${field} harus lebih kecil dari 512×512 (diterima ${size ? `${size.width}×${size.height}` : "ukuran tidak terbaca"}).`);
+        }
+        return buf;
+      };
+      input.reference = checkRef(payload.reference_image, "reference_image");
+      const extra = Array.isArray(payload.extra_reference_images) ? payload.extra_reference_images : [];
+      if (extra.length > 3) throw new RequestError("Maksimal 3 extra_reference_images (total 4 referensi FLUX.2).");
+      input.extraReferences = extra.map((v, i) => checkRef(v, `extra_reference_images[${i}]`));
     }
   } catch (err) {
     if (err instanceof RequestError) return fail(400, "INVALID_REQUEST", err.message);

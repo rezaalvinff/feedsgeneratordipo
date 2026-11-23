@@ -114,3 +114,20 @@ export function buildHarmonizePrompt(scene: string): string {
     "Shot on a full-frame DSLR with a 35mm lens, natural light, photorealistic, high detail, no CGI look.",
   ].join(" ");
 }
+
+/**
+ * Harmonisasi "kuat": mobil dirender ulang sebagai mobil fisik yang difoto di lokasi.
+ * Image 1 = komposit (posisi, ukuran, sudut), image 2 = foto mobil asli (identitas model).
+ */
+export function buildRealPhotoPrompt(scene: string): string {
+  const s = clean(scene);
+  return [
+    "Image 1 is a rough photo composite that shows the scene, the camera angle and exactly where the car stands.",
+    "Image 2 shows the exact car model.",
+    `Create one real photograph of this exact car (same make and model, body shape, paint color, grille, headlights and wheels as in image 2), standing in the same place, at the same size and angle as in image 1${s ? `, in ${s}` : ""}.`,
+    "The car in the composite looks like a CGI catalog render: make it look like a real physical car photographed on location,",
+    "with real metallic paint showing natural reflections of the sky and surroundings, real glass reflections, real rubber tires resting on the ground with contact shadows,",
+    "natural light falling on the body from the same direction as the scene lighting, subtle real-world imperfections and photographic depth.",
+    "Editorial automotive photography shot on a full-frame DSLR with a 35mm lens, natural light, ultra realistic, not a 3D render, not CGI.",
+  ].join(" ");
+}
